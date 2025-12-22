@@ -175,7 +175,14 @@ NSString *const kFPRNetworkTracePropertyName = @"fpr_networkTrace";
 
 - (void)checkpointState:(FPRNetworkTraceCheckpointState)state {
   if (!self.traceCompleted && self.traceStarted) {
-    NSString *stateKey = @(state).stringValue;
+    // Defensive check: Ensure we don't crash generating the string key
+    NSString *stateKey = nil;
+    @try {
+        stateKey = @(state).stringValue;
+    } @catch (NSException *e) {
+        return;
+    }
+      
     if (stateKey) {
       dispatch_sync(self.syncQueue, ^{
         NSNumber *existingState = _states[stateKey];
@@ -244,24 +251,34 @@ NSString *const kFPRNetworkTracePropertyName = @"fpr_networkTrace";
 #pragma mark - FPRNetworkResponseHandler methods
 
 - (void)didCompleteRequestWithResponse:(NSURLResponse *)response error:(NSError *)error {
-  if (!self.traceCompleted && self.traceStarted) {
-    // Extract needed fields for the trace object.
-    if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-      NSHTTPURLResponse *HTTPResponse = (NSHTTPURLResponse *)response;
-      self.responseCode = (int32_t)HTTPResponse.statusCode;
+  @synchronized(self) {
+    if (self.traceCompleted || !self.traceStarted) {
+      return;
     }
-    self.responseError = error;
-// Safely copy MIMEType to prevent use after free
-    NSString *mime = [response.MIMEType copy];
-    self.responseContentType = (mime.length ? mime : nil);
-    [self checkpointState:FPRNetworkTraceCheckpointStateResponseCompleted];
-
-    // Send the network trace for logging.
-    [[FPRSessionManager sharedInstance] collectAllGaugesOnce];
-    [[FPRClient sharedInstance] logNetworkTrace:self];
-
     self.traceCompleted = YES;
   }
+
+  int32_t statusCode = 0;
+  if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+    statusCode = (int32_t)[(NSHTTPURLResponse *)response statusCode];
+  }
+  
+  [self setResponseCode:statusCode];
+
+  self.responseError = error;
+
+  NSString *mime = nil;
+  @try {
+      mime = [response.MIMEType copy];
+  } @catch (NSException *exception) {
+      FPRLogInfo(kFPRNetworkTraceInvalidInputs, @"Failed to extract MIMEType from response: %@", exception);
+  }
+  self.responseContentType = (mime.length ? mime : nil);
+
+  [self checkpointState:FPRNetworkTraceCheckpointStateResponseCompleted];
+
+  [[FPRSessionManager sharedInstance] collectAllGaugesOnce];
+  [[FPRClient sharedInstance] logNetworkTrace:self];
 
   FPRSessionManager *sessionManager = [FPRSessionManager sharedInstance];
   [sessionManager.sessionNotificationCenter removeObserver:self
