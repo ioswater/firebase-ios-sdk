@@ -174,26 +174,28 @@ NSString *const kFPRNetworkTracePropertyName = @"fpr_networkTrace";
 }
 
 - (void)checkpointState:(FPRNetworkTraceCheckpointState)state {
-  if (!self.traceCompleted && self.traceStarted) {
-    // Defensive check: Ensure we don't crash generating the string key
-    NSString *stateKey = nil;
-    @try {
+  @synchronized(self) {
+    if (!self.traceCompleted && self.traceStarted) {
+      // Defensive check: Ensure we don't crash generating the string key
+      NSString *stateKey = nil;
+      @try {
         stateKey = @(state).stringValue;
-    } @catch (NSException *e) {
+      } @catch (NSException *e) {
         return;
-    }
-      
-    if (stateKey) {
-      dispatch_sync(self.syncQueue, ^{
-        NSNumber *existingState = _states[stateKey];
+      }
 
-        if (existingState == nil) {
-          double intervalSinceEpoch = [[NSDate date] timeIntervalSince1970];
-          [_states setObject:@(intervalSinceEpoch) forKey:stateKey];
-        }
-      });
-    } else {
-      FPRAssert(NO, @"stateKey wasn't created for checkpoint state %ld", (long)state);
+      if (stateKey) {
+        dispatch_sync(self.syncQueue, ^{
+          NSNumber *existingState = _states[stateKey];
+
+          if (existingState == nil) {
+            double intervalSinceEpoch = [[NSDate date] timeIntervalSince1970];
+            [_states setObject:@(intervalSinceEpoch) forKey:stateKey];
+          }
+        });
+      } else {
+        FPRAssert(NO, @"stateKey wasn't created for checkpoint state %ld", (long)state);
+      }
     }
   }
 }
@@ -262,16 +264,17 @@ NSString *const kFPRNetworkTracePropertyName = @"fpr_networkTrace";
   if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
     statusCode = (int32_t)[(NSHTTPURLResponse *)response statusCode];
   }
-  
+
   [self setResponseCode:statusCode];
 
   self.responseError = error;
 
   NSString *mime = nil;
   @try {
-      mime = [response.MIMEType copy];
+    mime = [response.MIMEType copy];
   } @catch (NSException *exception) {
-      FPRLogInfo(kFPRNetworkTraceInvalidInputs, @"Failed to extract MIMEType from response: %@", exception);
+    FPRLogInfo(kFPRNetworkTraceInvalidInputs, @"Failed to extract MIMEType from response: %@",
+               exception);
   }
   self.responseContentType = (mime.length ? mime : nil);
 
