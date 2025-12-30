@@ -173,26 +173,55 @@ NSString *const kFPRNetworkTracePropertyName = @"fpr_networkTrace";
   return copiedStates;
 }
 
+/** 
+ * 将枚举状态转换为字符串键，使用静态字符串避免堆内存分配。
+ * 这是防御性编程：避免在堆内存可能被破坏的环境中触发 malloc 崩溃。
+ * @param state 网络追踪检查点状态枚举值
+ * @return 对应的静态字符串键，如果状态未知则返回 nil
+ */
++ (NSString *)stringKeyForCheckpointState:(FPRNetworkTraceCheckpointState)state {
+  // 使用静态字符串字面量，它们存储在只读数据段，不需要堆分配
+  switch (state) {
+    case FPRNetworkTraceCheckpointStateUnknown:
+      return @"0";
+    case FPRNetworkTraceCheckpointStateInitiated:
+      return @"1";
+    case FPRNetworkTraceCheckpointStateRequestCompleted:
+      return @"2";
+    case FPRNetworkTraceCheckpointStateResponseReceived:
+      return @"3";
+    case FPRNetworkTraceCheckpointStateResponseCompleted:
+      return @"4";
+    default:
+      // 未知状态，返回 nil 而不是尝试动态分配
+      return nil;
+  }
+}
+
 - (void)checkpointState:(FPRNetworkTraceCheckpointState)state {
   @synchronized(self) {
     if (!self.traceCompleted && self.traceStarted) {
-      // Defensive check: Ensure we don't crash generating the string key
-      NSString *stateKey = nil;
-      @try {
-        stateKey = @(state).stringValue;
-      } @catch (NSException *e) {
-        return;
-      }
+      // 使用静态方法获取字符串键，避免字符串转换的堆分配
+      NSString *stateKey = [FPRNetworkTrace stringKeyForCheckpointState:state];
 
       if (stateKey) {
-        dispatch_sync(self.syncQueue, ^{
-          NSNumber *existingState = _states[stateKey];
+        // 防御性编程：即使使用静态 key，NSDate、NSNumber 装箱、字典扩容仍可能触发 malloc
+        // 在堆内存被破坏的环境中，任何 malloc 调用都可能崩溃
+        // 策略：用 @try-@catch 包裹，失败则静默放弃此次记录（监控数据丢失总比崩溃好）
+        @try {
+          dispatch_sync(self.syncQueue, ^{
+            NSNumber *existingState = _states[stateKey];
 
-          if (existingState == nil) {
-            double intervalSinceEpoch = [[NSDate date] timeIntervalSince1970];
-            [_states setObject:@(intervalSinceEpoch) forKey:stateKey];
-          }
-        });
+            if (existingState == nil) {
+              double intervalSinceEpoch = [[NSDate date] timeIntervalSince1970];
+              [_states setObject:@(intervalSinceEpoch) forKey:stateKey];
+            }
+          });
+        } @catch (NSException *exception) {
+          // 静默失败，避免因监控代码导致应用崩溃
+          // 在生产环境中，丢失一条监控数据总比整个应用崩溃要好
+          return;
+        }
       } else {
         FPRAssert(NO, @"stateKey wasn't created for checkpoint state %ld", (long)state);
       }
@@ -230,12 +259,18 @@ NSString *const kFPRNetworkTracePropertyName = @"fpr_networkTrace";
 }
 
 - (NSTimeInterval)startTimeSinceEpoch {
-  NSString *stateKey =
-      [NSString stringWithFormat:@"%lu", (unsigned long)FPRNetworkTraceCheckpointStateInitiated];
-  __block NSTimeInterval timeSinceEpoch;
-  dispatch_sync(self.syncQueue, ^{
-    timeSinceEpoch = [[_states objectForKey:stateKey] doubleValue];
-  });
+  // 使用静态方法避免 stringWithFormat 的堆分配
+  NSString *stateKey = [FPRNetworkTrace stringKeyForCheckpointState:FPRNetworkTraceCheckpointStateInitiated];
+  __block NSTimeInterval timeSinceEpoch = 0;
+  if (stateKey) {
+    @try {
+      dispatch_sync(self.syncQueue, ^{
+        timeSinceEpoch = [[_states objectForKey:stateKey] doubleValue];
+      });
+    } @catch (NSException *exception) {
+      // 静默失败，返回 0
+    }
+  }
   return timeSinceEpoch;
 }
 
@@ -325,12 +360,26 @@ NSString *const kFPRNetworkTracePropertyName = @"fpr_networkTrace";
 
 - (NSTimeInterval)timeIntervalBetweenCheckpointState:(FPRNetworkTraceCheckpointState)startState
                                             andState:(FPRNetworkTraceCheckpointState)endState {
-  __block NSNumber *startStateTime;
-  __block NSNumber *endStateTime;
-  dispatch_sync(self.syncQueue, ^{
-    startStateTime = [_states objectForKey:[@(startState) stringValue]];
-    endStateTime = [_states objectForKey:[@(endState) stringValue]];
-  });
+  // 使用静态方法避免 @(state).stringValue 的堆分配
+  NSString *startKey = [FPRNetworkTrace stringKeyForCheckpointState:startState];
+  NSString *endKey = [FPRNetworkTrace stringKeyForCheckpointState:endState];
+  
+  if (startKey == nil || endKey == nil) {
+    return 0;
+  }
+  
+  __block NSNumber *startStateTime = nil;
+  __block NSNumber *endStateTime = nil;
+  
+  @try {
+    dispatch_sync(self.syncQueue, ^{
+      startStateTime = [_states objectForKey:startKey];
+      endStateTime = [_states objectForKey:endKey];
+    });
+  } @catch (NSException *exception) {
+    return 0;
+  }
+  
   // Fail fast. If any of the times do not exist, return 0.
   if (startStateTime == nil || endStateTime == nil) {
     return 0;
