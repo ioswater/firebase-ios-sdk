@@ -33,6 +33,7 @@ static NSTimeInterval gAppStartMaxValidDuration = 60 * 60;  // 60 minutes.
 static FPRCPUGaugeData *gAppStartCPUGaugeData = nil;
 static FPRMemoryGaugeData *gAppStartMemoryGaugeData = nil;
 static BOOL isActivePrewarm = NO;
+static BOOL isBackgroundColdLaunch = NO;
 
 NSString *const kFPRAppStartTraceName = @"_as";
 NSString *const kFPRAppStartStageNameTimeToUI = @"_astui";
@@ -113,6 +114,10 @@ NSString *const kFPRAppCounterNameActivePrewarm = @"_fsapc";
 
 + (void)applicationDidFinishLaunching:(NSNotification *)notification {
   applicationDidFinishLaunchTime = [NSDate date];
+  // Detect background cold launch (e.g. Live Activity push-to-start, silent push)
+  if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+    isBackgroundColdLaunch = YES;
+  }
   [[NSNotificationCenter defaultCenter] removeObserver:self
                                                   name:UIApplicationDidFinishLaunchingNotification
                                                 object:nil];
@@ -284,7 +289,7 @@ NSString *const kFPRAppCounterNameActivePrewarm = @"_fsapc";
       // Dropping the app start trace in such situations where the launch time is taking more than
       // 60 minutes. This is an approximation, but a more agreeable timelimit for app start.
       if ((currentTimeSinceEpoch - startTimeSinceEpoch < gAppStartMaxValidDuration) &&
-          [self isAppStartEnabled] && ![self isApplicationPreWarmed]) {
+          [self isAppStartEnabled] && ![self isApplicationPreWarmed] && !isBackgroundColdLaunch) {
         [self.appStartTrace stop];
       } else {
         [self.appStartTrace cancel];
